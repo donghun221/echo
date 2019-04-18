@@ -4,6 +4,7 @@ import groovy.json.JsonOutput
 import com.netflix.spinnaker.echo.model.Trigger
 import retrofit.Endpoints
 import retrofit.RestAdapter
+import retrofit.converter.JacksonConverter
 import spock.lang.Ignore
 import spock.lang.Specification
 import spock.lang.Subject
@@ -18,6 +19,7 @@ class Front50ServiceSpec extends Specification {
   def client = Stub(Client)
   @Subject front50 = new RestAdapter.Builder()
     .setEndpoint(Endpoints.newFixedEndpoint(endpoint))
+    .setConverter(new JacksonConverter())
     .setClient(client)
     .build()
     .create(Front50Service)
@@ -27,7 +29,7 @@ class Front50ServiceSpec extends Specification {
     client.execute(_) >> response(pipelineWithNoTriggers)
 
     when:
-    def pipelines = front50.getPipelines().toBlocking().first()
+    def pipelines = front50.getPipelines()
 
     then:
     !pipelines.empty
@@ -38,7 +40,7 @@ class Front50ServiceSpec extends Specification {
     client.execute(_) >> response(pipelineWithNoTriggers)
 
     when:
-    def pipelines = front50.getPipelines().toBlocking().first()
+    def pipelines = front50.getPipelines()
 
     then:
     def pipeline = pipelines.first()
@@ -50,7 +52,7 @@ class Front50ServiceSpec extends Specification {
     client.execute(_) >> response(pipelineWithJenkinsTrigger)
 
     when:
-    def pipelines = front50.getPipelines().toBlocking().first()
+    def pipelines = front50.getPipelines()
 
     then:
     def pipeline = pipelines.find { it.application == "rush" && it.name == "bob the sinner" }
@@ -69,7 +71,7 @@ class Front50ServiceSpec extends Specification {
     client.execute(_) >> response(parallelPipeline)
 
     when:
-    def pipelines = front50.getPipelines().toBlocking().first()
+    def pipelines = front50.getPipelines()
 
     then:
     pipelines.first().parallel
@@ -78,7 +80,7 @@ class Front50ServiceSpec extends Specification {
   @Ignore
   def "list properties are immutable"() {
     given:
-    def pipelines = front50.getPipelines().toBlocking().first()
+    def pipelines = front50.getPipelines()
     def pipeline = pipelines.find { it.application == "kato" }
 
     expect:

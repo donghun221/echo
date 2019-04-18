@@ -17,9 +17,10 @@
 package com.netflix.spinnaker.echo.pubsub
 
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.netflix.spectator.api.NoopRegistry
 import com.netflix.spinnaker.echo.model.pubsub.MessageDescription
 import com.netflix.spinnaker.echo.model.pubsub.PubsubSystem
-import com.netflix.spinnaker.echo.pipelinetriggers.monitor.PubsubEventMonitor
+import com.netflix.spinnaker.echo.pipelinetriggers.monitor.TriggerEventListener
 import com.netflix.spinnaker.echo.pubsub.model.MessageAcknowledger
 import com.netflix.spinnaker.kork.jedis.EmbeddedRedis
 import com.netflix.spinnaker.kork.jedis.JedisClientDelegate
@@ -46,13 +47,14 @@ class PubsubMessageHandlerSpec extends Specification {
 
   MessageDigest messageDigest = MessageDigest.getInstance("SHA-256")
 
-  PubsubEventMonitor pubsubEventMonitor = Mock(PubsubEventMonitor)
+  TriggerEventListener triggerEventListener = Mock(TriggerEventListener)
 
   @Subject
   PubsubMessageHandler pubsubMessageHandler = new PubsubMessageHandler(
-    pubsubEventMonitor,
+    triggerEventListener,
     new ObjectMapper(),
     redisClientSelector,
+    new NoopRegistry()
   )
 
   def setupSpec() {
@@ -69,7 +71,7 @@ class PubsubMessageHandlerSpec extends Specification {
     given:
     String key = 'key'
     String id = 'id'
-    Long ackDeadline = 1000
+    Integer ackDeadline = 1
 
     when:
     def resp = pubsubMessageHandler.acquireMessageLock(key, id, ackDeadline)
@@ -82,7 +84,7 @@ class PubsubMessageHandlerSpec extends Specification {
     given:
     String key = 'key'
     String id = 'id'
-    Long ackDeadline = 1000
+    Integer ackDeadline = 1
 
     when:
     pubsubMessageHandler.acquireMessageLock(key, id, ackDeadline)
@@ -96,11 +98,11 @@ class PubsubMessageHandlerSpec extends Specification {
     given:
     String key = 'key'
     String id = 'id'
-    Long ackDeadline = 10
+    Integer ackDeadline = 1
 
     when:
     pubsubMessageHandler.acquireMessageLock(key, id, ackDeadline)
-    sleep(15)
+    sleep(1005)
     def resp = pubsubMessageHandler.acquireMessageLock(key, id, ackDeadline)
 
     then:
@@ -111,8 +113,8 @@ class PubsubMessageHandlerSpec extends Specification {
     given:
     String key = 'key'
     String id = 'id'
-    Long ackDeadline = 100
-    Long retentionDeadline = 1000
+    Integer ackDeadline = 1
+    Integer retentionDeadline = 5
 
     when:
     pubsubMessageHandler.setMessageHandled(key, id, retentionDeadline)
@@ -129,8 +131,8 @@ class PubsubMessageHandlerSpec extends Specification {
     .subscriptionName('subscriptionName')
     .messagePayload('THE TRUTH IS OUT THERE')
     .pubsubSystem(PubsubSystem.GOOGLE)
-    .ackDeadlineMillis(1000)
-    .retentionDeadlineMillis(10001)
+    .ackDeadlineSeconds(1)
+    .retentionDeadlineSeconds(2)
     .build()
 
     def acker = Mock(MessageAcknowledger)
@@ -140,7 +142,7 @@ class PubsubMessageHandlerSpec extends Specification {
     pubsubMessageHandler.handleMessage(description, acker, id, messageId)
 
     then:
-    1 * pubsubEventMonitor.processEvent(_)
+    1 * triggerEventListener.processEvent(_)
     1 * acker.ack()
     0 * acker.nack() // Lock acquisition failed.
   }
@@ -152,8 +154,8 @@ class PubsubMessageHandlerSpec extends Specification {
         .subscriptionName('subscriptionName')
         .messagePayload('THE TRUTH IS OUT THERE')
         .pubsubSystem(PubsubSystem.GOOGLE)
-        .ackDeadlineMillis(1000)
-        .retentionDeadlineMillis(10001)
+        .ackDeadlineSeconds(1)
+        .retentionDeadlineSeconds(2)
         .build()
 
     def acker = Mock(MessageAcknowledger)
@@ -164,8 +166,7 @@ class PubsubMessageHandlerSpec extends Specification {
     pubsubMessageHandler.handleMessage(description, acker, id, messageId)
 
     then:
-    1 * pubsubEventMonitor.processEvent(_)
-    1 * acker.ack()
-    1 * acker.nack() // Lock acquisition failed.
+    1 * triggerEventListener.processEvent(_)
+    2 * acker.ack() // duplicate is dismissed
   }
 }

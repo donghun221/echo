@@ -1,12 +1,13 @@
 package com.netflix.spinnaker.echo.test
 
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.netflix.spinnaker.echo.model.Metadata
 import com.netflix.spinnaker.echo.model.Pipeline
 import com.netflix.spinnaker.echo.model.Trigger
 import com.netflix.spinnaker.echo.model.pubsub.MessageDescription
 import com.netflix.spinnaker.echo.model.pubsub.PubsubSystem
 import com.netflix.spinnaker.echo.model.trigger.*
-import com.netflix.spinnaker.echo.pipelinetriggers.monitor.PubsubEventMonitor
+import com.netflix.spinnaker.echo.pipelinetriggers.eventhandlers.PubsubEventHandler
 import com.netflix.spinnaker.kork.artifacts.model.Artifact
 import com.netflix.spinnaker.kork.artifacts.model.ExpectedArtifact
 import retrofit.RetrofitError
@@ -27,6 +28,8 @@ trait RetrofitStubs {
   final Trigger disabledTravisTrigger = Trigger.builder().enabled(false).type('travis').master('master').job('job').build()
   final Trigger enabledWerckerTrigger = Trigger.builder().enabled(true).type('wercker').master('master').job('job').build()
   final Trigger disabledWerckerTrigger = Trigger.builder().enabled(false).type('wercker').master('master').job('job').build()
+  final Trigger enabledConcourseTrigger = Trigger.builder().enabled(true).type('concourse').master('master').job('job').build()
+  final Trigger disabledConcourseTrigger = Trigger.builder().enabled(false).type('concourse').master('master').job('job').build()
   final Trigger nonJenkinsTrigger = Trigger.builder().enabled(true).type('not jenkins').master('master').job('job').build()
   final Trigger enabledStashTrigger = Trigger.builder().enabled(true).type('git').source('stash').project('project').slug('slug').build()
   final Trigger disabledStashTrigger = Trigger.builder().enabled(false).type('git').source('stash').project('project').slug('slug').build()
@@ -90,7 +93,7 @@ trait RetrofitStubs {
     def res = new WebhookEvent()
     res.details = new Metadata([type: WebhookEvent.TYPE, source: source])
     res.payload = payload
-    res.content = payload
+    res.content = new ObjectMapper().convertValue(payload, WebhookEvent.Content)
     return res
   }
 
@@ -99,7 +102,7 @@ trait RetrofitStubs {
 
     def description = MessageDescription.builder()
         .pubsubSystem(pubsubSystem)
-        .ackDeadlineMillis(10000)
+        .ackDeadlineSeconds(1)
         .subscriptionName(subscriptionName)
         .artifacts(artifacts)
         .build()
@@ -107,7 +110,7 @@ trait RetrofitStubs {
     def content = new PubsubEvent.Content()
     content.setMessageDescription(description)
 
-    res.details = new Metadata([type: PubsubEventMonitor.PUBSUB_TRIGGER_TYPE])
+    res.details = new Metadata([type: PubsubEventHandler.PUBSUB_TRIGGER_TYPE])
     res.content = content
     res.payload = payload
     return res

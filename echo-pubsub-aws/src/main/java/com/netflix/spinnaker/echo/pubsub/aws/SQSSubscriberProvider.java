@@ -22,7 +22,7 @@ import com.amazonaws.services.sns.AmazonSNSClientBuilder;
 import com.amazonaws.services.sqs.AmazonSQSClientBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.netflix.spectator.api.Registry;
-import com.netflix.spinnaker.echo.artifacts.JinjavaFactory;
+import com.netflix.spinnaker.echo.artifacts.MessageArtifactTranslator;
 import com.netflix.spinnaker.echo.config.AmazonPubsubProperties;
 import com.netflix.spinnaker.echo.discovery.DiscoveryActivated;
 import com.netflix.spinnaker.echo.pubsub.PubsubMessageHandler;
@@ -32,7 +32,7 @@ import com.netflix.spinnaker.kork.aws.ARN;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -46,7 +46,7 @@ import java.util.concurrent.RejectedExecutionException;
  * Starts the individual SQS workers (one for each subscription)
  */
 @Component
-@ConditionalOnProperty("pubsub.amazon.enabled")
+@ConditionalOnExpression("${pubsub.enabled:false} && ${pubsub.amazon.enabled:false}")
 public class SQSSubscriberProvider implements DiscoveryActivated {
   private static final Logger log = LoggerFactory.getLogger(SQSSubscriberProvider.class);
 
@@ -56,7 +56,7 @@ public class SQSSubscriberProvider implements DiscoveryActivated {
   private final PubsubSubscribers pubsubSubscribers;
   private final PubsubMessageHandler pubsubMessageHandler;
   private final Registry registry;
-  private final JinjavaFactory jinjavaFactory;
+  private final MessageArtifactTranslator.Factory messageArtifactTranslatorFactory;
 
   @Autowired
   SQSSubscriberProvider(ObjectMapper objectMapper,
@@ -65,14 +65,14 @@ public class SQSSubscriberProvider implements DiscoveryActivated {
                         PubsubSubscribers pubsubSubscribers,
                         PubsubMessageHandler pubsubMessageHandler,
                         Registry registry,
-                        JinjavaFactory jinjavaFactory) {
+                        MessageArtifactTranslator.Factory messageArtifactTranslatorFactory) {
     this.objectMapper = objectMapper;
     this.awsCredentialsProvider = awsCredentialsProvider;
     this.properties = properties;
     this.pubsubSubscribers = pubsubSubscribers;
     this.pubsubMessageHandler = pubsubMessageHandler;
     this.registry = registry;
-    this.jinjavaFactory = jinjavaFactory;
+    this.messageArtifactTranslatorFactory = messageArtifactTranslatorFactory;
   }
 
   @PostConstruct
@@ -111,9 +111,9 @@ public class SQSSubscriberProvider implements DiscoveryActivated {
           .withClientConfiguration(new ClientConfiguration())
           .withRegion(queueArn.getRegion())
           .build(),
-        () -> enabled.get(),
+        enabled::get,
         registry,
-        jinjavaFactory
+        messageArtifactTranslatorFactory
       );
 
       try {

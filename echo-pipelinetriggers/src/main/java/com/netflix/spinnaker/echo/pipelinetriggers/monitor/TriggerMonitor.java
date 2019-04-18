@@ -16,42 +16,56 @@
 
 package com.netflix.spinnaker.echo.pipelinetriggers.monitor;
 
+import com.netflix.spectator.api.Id;
 import com.netflix.spectator.api.Registry;
 import com.netflix.spinnaker.echo.events.EchoEventListener;
 import com.netflix.spinnaker.echo.model.Event;
 import com.netflix.spinnaker.echo.model.Pipeline;
-import com.netflix.spinnaker.echo.model.Trigger;
 import com.netflix.spinnaker.echo.model.trigger.TriggerEvent;
+import com.netflix.spinnaker.echo.pipelinetriggers.PipelineCache;
+import com.netflix.spinnaker.echo.pipelinetriggers.eventhandlers.TriggerEventHandler;
+import com.netflix.spinnaker.echo.pipelinetriggers.orca.PipelineInitiator;
+import com.netflix.spinnaker.echo.pipelinetriggers.postprocessors.PipelinePostProcessorHandler;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Function;
-import java.util.function.Predicate;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import lombok.AllArgsConstructor;
+import java.util.concurrent.TimeoutException;
+
 import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.stereotype.Component;
-import rx.Observable;
-import rx.functions.Action1;
-import rx.functions.Func1;
 
 /**
- * Triggers pipelines on _Orca_ when a trigger-enabled build completes successfully.
+ * Triggers pipelines in orca when a TriggerEvent of type T is received by echo.
  */
-@Component
 @Slf4j
-public abstract class TriggerMonitor implements EchoEventListener {
-  @AllArgsConstructor
-  static class TriggerMatchParameters {
-    TriggerEvent event;
-    List<Pipeline> pipelines;
+public class TriggerMonitor<T extends TriggerEvent> implements EchoEventListener {
+  private final PipelineInitiator pipelineInitiator;
+  private final Registry registry;
+  private final PipelineCache pipelineCache;
+  private final PipelinePostProcessorHandler pipelinePostProcessorHandler;
+  private final TriggerEventHandler<T> eventHandler;
+
+  TriggerMonitor(@NonNull PipelineCache pipelineCache,
+    @NonNull PipelineInitiator pipelineInitiator,
+    @NonNull Registry registry,
+    @NonNull PipelinePostProcessorHandler pipelinePostProcessorHandler,
+    @NonNull TriggerEventHandler<T> eventHandler) {
+    this.pipelineCache = pipelineCache;
+    this.pipelineInitiator = pipelineInitiator;
+    this.registry = registry;
+    this.pipelinePostProcessorHandler = pipelinePostProcessorHandler;
+    this.eventHandler = eventHandler;
   }
 
-  protected final Action1<Pipeline> subscriber;
-  protected final Registry registry;
+  public void processEvent(Event event) {
+    validateEvent(event);
+    if (eventHandler.handleEventType(event.getDetails().getType())) {
+      recordMetrics();
+      T triggerEvent = eventHandler.convertEvent(event);
+      triggerMatchingPipelines(triggerEvent);
+    }
+  }
 
-  protected void validateEvent(Event event) {
+  private void validateEvent(Event event) {
     if (event.getDetails() == null) {
       throw new IllegalArgumentException("Event details required by the event monitor.");
     } else if (event.getDetails().getType() == null) {
@@ -59,81 +73,35 @@ public abstract class TriggerMonitor implements EchoEventListener {
     }
   }
 
-  public TriggerMonitor(@NonNull Action1<Pipeline> subscriber,
-                        @NonNull Registry registry) {
-    this.subscriber = subscriber;
-    this.registry = registry;
+  private void triggerMatchingPipelines(T event) {
+    try {
+      List<Pipeline> allPipelines = pipelineCache.getPipelinesSync();
+      List<Pipeline> matchingPipelines = eventHandler.getMatchingPipelines(event, allPipelines);
+      matchingPipelines.stream()
+        .map(pipelinePostProcessorHandler::process)
+        .forEach(p -> {
+          recordMatchingPipeline(p);
+          pipelineInitiator.startPipeline(p);
+        });
+    } catch (TimeoutException e) {
+      log.error("Failed to get pipeline configs", e);
+    }
   }
 
-  protected boolean matchesPattern(String s, String pattern) {
-    Pattern p = Pattern.compile(pattern);
-    Matcher m = p.matcher(s);
-    return m.matches();
+  private void recordMetrics() {
+    registry.counter("echo.events.processed").increment();
   }
 
-  protected void onEchoResponse(final TriggerEvent event) {
-    registry.gauge("echo.events.per.poll", 1);
-  }
-
-  protected Action1<TriggerMatchParameters> triggerEachMatch() {
-    return parameters -> {
-      triggerEachMatchFrom(parameters.pipelines).call(parameters.event);
-    };
-  }
-
-  protected Action1<TriggerEvent> triggerEachMatchFrom(final List<Pipeline> pipelines) {
-    return event -> {
-      if (isSuccessfulTriggerEvent(event)) {
-        Observable.from(pipelines)
-          .doOnCompleted(() -> onEventProcessed(event))
-          .map(withMatchingTrigger(event))
-          .filter(Optional::isPresent)
-          .map(Optional::get)
-          .doOnNext(this::onMatchingPipeline)
-          .subscribe(subscriber, this::onSubscriberError);
-      } else {
-        onEventProcessed(event);
-      }
-    };
-  }
-
-  protected Func1<Pipeline, Optional<Pipeline>> withMatchingTrigger(final TriggerEvent event) {
-    return pipeline -> {
-      if (pipeline.getTriggers() == null || pipeline.isDisabled()) {
-        return Optional.empty();
-      } else {
-        return pipeline.getTriggers()
-          .stream()
-          .filter(this::isValidTrigger)
-          .filter(matchTriggerFor(event, pipeline))
-          .findFirst()
-          .map(buildTrigger(pipeline, event));
-      }
-    };
-  }
-
-  protected abstract boolean isSuccessfulTriggerEvent(TriggerEvent event);
-
-  protected abstract Predicate<Trigger> matchTriggerFor(final TriggerEvent event, final Pipeline pipeline);
-
-  protected abstract Function<Trigger, Pipeline> buildTrigger(Pipeline pipeline, TriggerEvent event);
-
-  protected abstract boolean isValidTrigger(final Trigger trigger);
-
-  protected abstract void emitMetricsOnMatchingPipeline(Pipeline pipeline);
-
-  protected void onMatchingPipeline(Pipeline pipeline) {
+  private void recordMatchingPipeline(Pipeline pipeline) {
     log.info("Found matching pipeline {}:{}", pipeline.getApplication(), pipeline.getName());
     emitMetricsOnMatchingPipeline(pipeline);
   }
 
-  protected void onEventProcessed(final TriggerEvent event) {
-    registry.counter("echo.events.processed").increment();
-  }
-
-  private void onSubscriberError(Throwable error) {
-    log.error("Subscriber raised an error processing pipeline", error);
-    registry.counter("trigger.errors").increment();
+  private void emitMetricsOnMatchingPipeline(Pipeline pipeline) {
+    Id id = registry.createId("pipelines.triggered")
+      .withTag("monitor", eventHandler.getClass().getSimpleName())
+      .withTag("application", pipeline.getApplication())
+      .withTags(eventHandler.getAdditionalTags(pipeline));
+    registry.counter(id).increment();
   }
 }
-

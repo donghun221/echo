@@ -24,8 +24,8 @@ import com.amazonaws.services.sqs.model.ReceiveMessageRequest;
 import com.amazonaws.services.sqs.model.ReceiveMessageResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hubspot.jinjava.interpret.FatalTemplateErrorsException;
+import com.netflix.spectator.api.Id;
 import com.netflix.spectator.api.Registry;
-import com.netflix.spinnaker.echo.artifacts.JinjavaFactory;
 import com.netflix.spinnaker.echo.artifacts.MessageArtifactTranslator;
 import com.netflix.spinnaker.echo.config.AmazonPubsubProperties;
 import com.netflix.spinnaker.echo.model.pubsub.MessageDescription;
@@ -40,8 +40,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -84,7 +85,7 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
                        AmazonSQS amazonSQS,
                        Supplier<Boolean> isEnabled,
                        Registry registry,
-                       JinjavaFactory jinjavaFactory) {
+                       MessageArtifactTranslator.Factory messageArtifactTranslatorFactory) {
     this.objectMapper = objectMapper;
     this.subscription = subscription;
     this.pubsubMessageHandler = pubsubMessageHandler;
@@ -93,7 +94,7 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
     this.isEnabled = isEnabled;
     this.registry = registry;
 
-    this.messageArtifactTranslator = new MessageArtifactTranslator(subscription.readTemplatePath(), jinjavaFactory);
+    this.messageArtifactTranslator = messageArtifactTranslatorFactory.createJinja(subscription.readTemplatePath());
     this.queueARN = new ARN(subscription.getQueueARN());
     this.topicARN = new ARN(subscription.getTopicARN());
   }
@@ -103,18 +104,18 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
   }
 
   @Override
-  public PubsubSystem pubsubSystem() {
+  public PubsubSystem getPubsubSystem() {
     return pubsubSystem;
   }
 
   @Override
-  public String subscriptionName() {
+  public String getSubscriptionName() {
     return subscription.getName();
   }
 
   @Override
   public String getName() {
-    return subscriptionName();
+    return getSubscriptionName();
   }
 
   @Override
@@ -168,18 +169,24 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
   private void handleMessage(Message message) {
     try {
       String messageId = message.getMessageId();
-      String messagePayload = unmarshallMessageBody(message.getBody());
+      String messagePayload = unmarshalMessageBody(message.getBody());
 
       Map<String, String> stringifiedMessageAttributes = message.getMessageAttributes().entrySet().stream()
         .collect(Collectors.toMap(Map.Entry::getKey, e -> String.valueOf(e.getValue())));
 
+      //SNS message attributes are stored within the SQS message body. Add them to other attributes..
+      Map<String, MessageAttributeWrapper> messageAttributes = unmarshalMessageAttributes(message.getBody());
+      stringifiedMessageAttributes.putAll(messageAttributes.entrySet().stream()
+        .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().getAttributeValue())));
+
+
       MessageDescription description = MessageDescription.builder()
-        .subscriptionName(subscriptionName())
+        .subscriptionName(getSubscriptionName())
         .messagePayload(messagePayload)
         .messageAttributes(stringifiedMessageAttributes)
         .pubsubSystem(pubsubSystem)
-        .ackDeadlineMillis(TimeUnit.SECONDS.toMillis(50)) // Set a high upper bound on message processing time.
-        .retentionDeadlineMillis(TimeUnit.DAYS.toMillis(7)) // Expire key after max retention time, which is 7 days.
+        .ackDeadlineSeconds(60) // Set a high upper bound on message processing time.
+        .retentionDeadlineSeconds(subscription.getDedupeRetentionSeconds()) // Configurable but default to 1 hour
         .build();
 
       AmazonMessageAcknowledger acknowledger = new AmazonMessageAcknowledger(amazonSQS, queueId, message, registry, getName());
@@ -191,8 +198,17 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
           log.error("Template failed to process artifacts for message {}", message, e);
         }
       }
+
+      if (subscription.getAlternateIdInMessageAttributes() != null
+          && !subscription.getAlternateIdInMessageAttributes().isEmpty()
+          && stringifiedMessageAttributes.containsKey(subscription.getAlternateIdInMessageAttributes())){
+        // Message attributes contain the unique id used for deduping
+        messageId = stringifiedMessageAttributes.get(subscription.getAlternateIdInMessageAttributes());
+      }
+
       pubsubMessageHandler.handleMessage(description, acknowledger, identity.getIdentity(), messageId);
     } catch (Exception e) {
+      registry.counter(getFailedToBeHandledMetricId(e)).increment();
       log.error("Message {} from queue {} failed to be handled", message, queueId, e);
       // Todo emjburns: add dead-letter queue policy
     }
@@ -208,7 +224,7 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
     return artifacts;
   }
 
-  private String unmarshallMessageBody(String messageBody) {
+  private String unmarshalMessageBody(String messageBody) {
     String messagePayload = messageBody;
     try {
       NotificationMessageWrapper wrapper = objectMapper.readValue(messagePayload, NotificationMessageWrapper.class);
@@ -222,5 +238,29 @@ public class SQSSubscriber implements Runnable, PubsubSubscriber {
       log.error("Unable unmarshal NotificationMessageWrapper. Unknown message type. (body: {})", messageBody, e);
     }
     return messagePayload;
+  }
+
+  /**
+   * If there is an error parsing message attributes because the message is not a notification message,
+   * an empty map will be returned.
+   */
+  private Map<String, MessageAttributeWrapper> unmarshalMessageAttributes(String messageBody) {
+    try {
+      NotificationMessageWrapper wrapper = objectMapper.readValue(messageBody, NotificationMessageWrapper.class);
+      if (wrapper != null && wrapper.getMessageAttributes() != null) {
+        return wrapper.getMessageAttributes();
+      }
+    } catch (IOException e) {
+      // Try to unwrap a notification message; if that doesn't work,
+      // we're dealing with a message we can't parse. The template or
+      // the pipeline potentially knows how to deal with it.
+      log.error("Unable to parse message attributes. Unknown message type. (body: {})", messageBody, e);
+    }
+    return Collections.emptyMap();
+  }
+
+  private Id getFailedToBeHandledMetricId(Exception e) {
+    return registry.createId("echo.pubsub.amazon.failedMessages")
+      .withTag("exceptionClass", e.getClass().getSimpleName());
   }
 }

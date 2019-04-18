@@ -23,7 +23,7 @@ import com.netflix.spinnaker.echo.pubsub.model.PubsubSubscriber;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -36,7 +36,7 @@ import javax.annotation.PreDestroy;
 @Slf4j
 @Service
 @Async
-@ConditionalOnProperty("pubsub.google.enabled")
+@ConditionalOnExpression("${pubsub.enabled:false} && ${pubsub.google.enabled:false}")
 public class GooglePubsubMonitor implements PollingMonitor {
 
   private Long lastPoll;
@@ -67,7 +67,7 @@ public class GooglePubsubMonitor implements PollingMonitor {
   }
 
   private void openConnection(PubsubSubscriber subscriber) {
-    log.info("Opening async connection to {}", subscriber.subscriptionName());
+    log.info("Opening async connection to {}", subscriber.getSubscriptionName());
     lastPoll = System.currentTimeMillis();
 
     GooglePubsubSubscriber googleSubscriber = (GooglePubsubSubscriber) subscriber;
@@ -75,7 +75,7 @@ public class GooglePubsubMonitor implements PollingMonitor {
   }
 
   private void closeConnection(PubsubSubscriber subscriber) {
-    log.info("Closing async connection to {}", subscriber.subscriptionName());
+    log.info("Closing async connection to {}", subscriber.getSubscriptionName());
     GooglePubsubSubscriber googleSubscriber = (GooglePubsubSubscriber) subscriber;
     googleSubscriber.stop();
   }

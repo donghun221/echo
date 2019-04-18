@@ -52,9 +52,20 @@ public class AmazonPubsubProperties {
 
     private MessageFormat messageFormat;
 
+    /**
+     * Provide an id, present in the message attributes as a string,
+     * to use as a unique identifier for processing messages.
+     * Fall back to amazon sqs id if alternate Id is not present in
+     * the message attributes
+     */
+    private String alternateIdInMessageAttributes;
+
     int visibilityTimeout = 30;
     int sqsMessageRetentionPeriodSeconds = 120;
     int waitTimeSeconds = 5;
+
+    // 1 hour default
+    private Integer dedupeRetentionSeconds = 3600;
 
     public AmazonPubsubSubscription() {
     }
@@ -64,12 +75,23 @@ public class AmazonPubsubProperties {
       String topicARN,
       String queueARN,
       String templatePath,
-      MessageFormat messageFormat) {
+      MessageFormat messageFormat,
+      String alternateIdInMessageAttributes,
+      Integer dedupeRetentionSeconds
+    ) {
       this.name = name;
       this.topicARN = topicARN;
       this.queueARN = queueARN;
       this.templatePath = templatePath;
       this.messageFormat = messageFormat;
+      this.alternateIdInMessageAttributes = alternateIdInMessageAttributes;
+      if (dedupeRetentionSeconds != null && dedupeRetentionSeconds >= 0) {
+        this.dedupeRetentionSeconds = dedupeRetentionSeconds;
+      } else {
+        if (dedupeRetentionSeconds != null) {
+          log.warn("Ignoring dedupeRetentionSeconds invalid value of " + dedupeRetentionSeconds);
+        }
+      }
     }
 
     private MessageFormat determineMessageFormat(){

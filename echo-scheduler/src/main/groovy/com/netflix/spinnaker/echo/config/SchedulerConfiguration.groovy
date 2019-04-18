@@ -15,101 +15,125 @@
  */
 
 package com.netflix.spinnaker.echo.config
-import com.netflix.astyanax.Keyspace
-import com.netflix.fenzo.triggers.TriggerOperator
-import com.netflix.fenzo.triggers.persistence.InMemoryTriggerDao
-import com.netflix.fenzo.triggers.persistence.TriggerDao
-import com.netflix.scheduledactions.ActionsOperator
-import com.netflix.scheduledactions.DaoConfigurer
-import com.netflix.scheduledactions.persistence.ActionInstanceDao
-import com.netflix.scheduledactions.persistence.ExecutionDao
-import com.netflix.scheduledactions.persistence.InMemoryActionInstanceDao
-import com.netflix.scheduledactions.persistence.InMemoryExecutionDao
-import com.netflix.scheduledactions.persistence.cassandra.CassandraActionInstanceDao
-import com.netflix.scheduledactions.persistence.cassandra.CassandraExecutionDao
-import com.netflix.scheduledactions.persistence.cassandra.CassandraTriggerDao
-import com.netflix.scheduledactions.web.controllers.ActionInstanceController
+
+import com.netflix.spinnaker.echo.scheduler.actions.pipeline.AutowiringSpringBeanJobFactory
+import com.netflix.spinnaker.echo.scheduler.actions.pipeline.PipelineConfigsPollingJob
+import com.netflix.spinnaker.echo.scheduler.actions.pipeline.PipelineTriggerJob
+import com.netflix.spinnaker.echo.scheduler.actions.pipeline.TriggerListener
+import com.netflix.spinnaker.echo.scheduler.actions.pipeline.TriggerConverter
+import com.netflix.spinnaker.kork.sql.config.DefaultSqlConfiguration
 import com.squareup.okhttp.OkHttpClient
+import org.quartz.JobDetail
+import org.quartz.Trigger
+import org.quartz.spi.JobFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression
+import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
-import org.springframework.context.annotation.ComponentScan
 import org.springframework.context.annotation.Configuration
+import org.springframework.context.annotation.Import
+import org.springframework.scheduling.quartz.JobDetailFactoryBean
+import org.springframework.scheduling.quartz.SchedulerFactoryBean
+import org.springframework.scheduling.quartz.SimpleTriggerFactoryBean
 import retrofit.client.Client
 import retrofit.client.OkClient
-
+import javax.sql.DataSource
 import java.util.concurrent.TimeUnit
 
 @Configuration
 @ConditionalOnExpression('${scheduler.enabled:false}')
-@ComponentScan(["com.netflix.spinnaker.echo.scheduler", "com.netflix.scheduledactions"])
+@Import(DefaultSqlConfiguration)
 class SchedulerConfiguration {
-
-    @Bean
-    @ConditionalOnExpression('${spinnaker.cassandra.enabled:true}')
-    ActionInstanceDao actionInstanceDao(Keyspace keyspace) {
-        new CassandraActionInstanceDao(keyspace)
+  @Bean
+  SchedulerFactoryBean schedulerFactoryBean(
+    Optional<DataSource> dataSourceOptional,
+    TriggerListener triggerListener,
+    JobDetail pipelineJobBean,
+    JobFactory jobFactory,
+    Optional<Trigger> syncJobTrigger
+  ) {
+    SchedulerFactoryBean factoryBean = new SchedulerFactoryBean()
+    if (dataSourceOptional.isPresent()) {
+      factoryBean.dataSource = dataSourceOptional.get()
     }
 
-    @Bean
-    @ConditionalOnExpression('${spinnaker.cassandra.enabled:true}')
-    ExecutionDao executionDao(Keyspace keyspace) {
-        new CassandraExecutionDao(keyspace)
+    factoryBean.setGlobalTriggerListeners(triggerListener)
+    factoryBean.setJobDetails(pipelineJobBean)
+    factoryBean.setJobFactory(jobFactory)
+
+    if (syncJobTrigger.isPresent()) {
+      factoryBean.setTriggers(syncJobTrigger.get())
     }
 
-    @Bean
-    @ConditionalOnExpression('${spinnaker.cassandra.enabled:true}')
-    TriggerDao triggerDao(Keyspace keyspace) {
-        new CassandraTriggerDao(keyspace)
-    }
+    return factoryBean
+  }
 
-    @Bean
-    @ConditionalOnExpression('${spinnaker.inMemory.enabled:false}')
-    ActionInstanceDao inMemoryActionInstanceDAO() {
-        new InMemoryActionInstanceDao()
-    }
+  /**
+   * Job factory used to create jobs as beans on behalf of Quartz
+   */
+  @Bean
+  JobFactory jobFactory(ApplicationContext applicationContext) {
+    AutowiringSpringBeanJobFactory jobFactory = new AutowiringSpringBeanJobFactory()
+    jobFactory.setApplicationContext(applicationContext)
 
-    @Bean
-    @ConditionalOnExpression('${spinnaker.inMemory.enabled:false}')
-    ExecutionDao inMemoryExecutionDao() {
-        new InMemoryExecutionDao()
-    }
+    return jobFactory
+  }
 
-    @Bean
-    @ConditionalOnExpression('${spinnaker.inMemory.enabled:false}')
-    TriggerDao inMemoryTriggerDao() {
-        new InMemoryTriggerDao()
-    }
+  /**
+   * Job for syncing pipeline triggers
+   */
+  @Bean
+  JobDetailFactoryBean pipelineSyncJobBean(
+    @Value('${scheduler.cron.timezone:America/Los_Angeles}') String timeZoneId
+  ) {
+    JobDetailFactoryBean syncJob = new JobDetailFactoryBean()
+    syncJob.jobClass = PipelineConfigsPollingJob.class
+    syncJob.jobDataMap.put("timeZoneId", timeZoneId)
+    syncJob.name = "Sync Pipelines"
+    syncJob.group = "Sync"
 
-    @Bean
-    DaoConfigurer daoConfigurer(ActionInstanceDao actionInstanceDao, TriggerDao triggerDao, ExecutionDao executionDao) {
-        return new DaoConfigurer(actionInstanceDao, triggerDao, executionDao)
-    }
+    return syncJob
+  }
 
-    @Bean
-    TriggerOperator triggerOperator(TriggerDao triggerDao,
-                                    @Value('${scheduler.threadPoolSize:10}') int threadPoolSize) {
-        new TriggerOperator(triggerDao, threadPoolSize)
-    }
+  /**
+   * Trigger for the job to sync pipeline triggers
+   */
+  @Bean
+  @ConditionalOnExpression('${scheduler.pipelineConfigsPoller.enabled:true}')
+  SimpleTriggerFactoryBean syncJobTriggerBean(
+    @Value('${scheduler.pipelineConfigsPoller.pollingIntervalMs:30000}') long intervalMs,
+    JobDetail pipelineSyncJobBean
+  ) {
+    SimpleTriggerFactoryBean triggerBean = new SimpleTriggerFactoryBean()
 
-    @Bean
-    ActionsOperator actionsOperator(TriggerOperator triggerOperator,
-                                    DaoConfigurer daoConfigurer,
-                                    @Value('${scheduler.threadPoolSize:10}') int threadPoolSize) {
-        new ActionsOperator(triggerOperator, daoConfigurer, threadPoolSize)
-    }
+    triggerBean.name = "Sync Pipelines"
+    triggerBean.group = "Sync"
+    triggerBean.startDelay = 60 * 1000
+    triggerBean.repeatInterval = intervalMs
+    triggerBean.jobDetail = pipelineSyncJobBean
 
-    @Bean
-    ActionInstanceController actionInstanceController(ActionsOperator actionsOperator) {
-        new ActionInstanceController(actionsOperator: actionsOperator)
-    }
+    return triggerBean
+  }
 
-    @Bean
-    Client retrofitClient(@Value('${retrofit.connectTimeoutMillis:10000}') long connectTimeoutMillis,
-                          @Value('${retrofit.readTimeoutMillis:15000}') long readTimeoutMillis) {
-        OkHttpClient okHttpClient = new OkHttpClient();
-        okHttpClient.setConnectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS);
-        okHttpClient.setReadTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS);
-        new OkClient(okHttpClient);
-    }
+  /**
+   * Job for firing off a pipeline
+   */
+  @Bean
+  JobDetailFactoryBean pipelineJobBean() {
+    JobDetailFactoryBean triggerJob = new JobDetailFactoryBean()
+    triggerJob.jobClass = PipelineTriggerJob.class
+    triggerJob.name = TriggerConverter.JOB_ID
+    triggerJob.durability = true
+
+    return triggerJob
+  }
+
+  @Bean
+  Client retrofitClient(@Value('${retrofit.connectTimeoutMillis:10000}') long connectTimeoutMillis,
+                        @Value('${retrofit.readTimeoutMillis:15000}') long readTimeoutMillis) {
+    OkHttpClient okHttpClient = new OkHttpClient()
+    okHttpClient.setConnectTimeout(connectTimeoutMillis, TimeUnit.MILLISECONDS)
+    okHttpClient.setReadTimeout(readTimeoutMillis, TimeUnit.MILLISECONDS)
+    new OkClient(okHttpClient)
+  }
 }

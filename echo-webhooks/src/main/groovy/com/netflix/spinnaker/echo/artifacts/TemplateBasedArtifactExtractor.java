@@ -36,11 +36,17 @@ import java.util.Optional;
 public class TemplateBasedArtifactExtractor implements WebhookArtifactExtractor {
   final private WebhookProperties webhookProperties;
   final private ObjectMapper objectMapper;
+  final private MessageArtifactTranslator.Factory messageArtifactTranslatorFactory;
 
   @Autowired
-  public TemplateBasedArtifactExtractor(Optional<WebhookProperties> webhookProperties, ObjectMapper objectMapper) {
+  public TemplateBasedArtifactExtractor(
+    Optional<WebhookProperties> webhookProperties,
+    ObjectMapper objectMapper,
+    MessageArtifactTranslator.Factory messageArtifactTranslatorFactory
+  ) {
     this.webhookProperties = webhookProperties.orElse(null);
     this.objectMapper = objectMapper;
+    this.messageArtifactTranslatorFactory = messageArtifactTranslatorFactory;
   }
 
   @Override
@@ -55,7 +61,7 @@ public class TemplateBasedArtifactExtractor implements WebhookArtifactExtractor 
     } else {
       MessageArtifactTranslator translator;
       try {
-        translator = new MessageArtifactTranslator(new FileInputStream(templatePath));
+        translator = messageArtifactTranslatorFactory.createJinja(new FileInputStream(templatePath));
       } catch (FileNotFoundException e) {
         throw new RuntimeException("Failed to read template path " + templatePath + ": " + e.getMessage(), e);
       }

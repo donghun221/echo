@@ -78,7 +78,8 @@ public class GooglePubsubProperties {
           return getClass().getResourceAsStream(messageFormat.jarPath);
         }
       } catch (IOException e) {
-        throw new RuntimeException("Failed to read template in subscription " + name + ": " + e.getMessage(), e);
+        throw new RuntimeException(
+          "Failed to read template in subscription " + name + ": " + e.getMessage(), e);
       }
     }
   }
@@ -91,19 +92,26 @@ public class GooglePubsubProperties {
     private String name;
 
     @NotEmpty
+    private String topicName;
+
+    @NotEmpty
     private String project;
 
     // Optional. Uses Application Default Credentials if not set.
     private String jsonPath;
 
-    @NotEmpty
-    private String topicName;
+    private Content content = Content.ALL;
 
     @Min(value = 1L, message = "Batch count threshold must be a positive integer. Defaults to 10.")
     private Long batchCountThreshold = 10L;
 
     @Min(value = 1L, message = "Delay milliseconds threshold must be a positive integer. Defaults to 1000.")
     private Long delayMillisecondsThreshold = 1000L;
+  }
+
+  public static enum Content {
+    ALL,
+    NOTIFICATIONS
   }
 
   public static enum MessageFormat {
@@ -118,6 +126,7 @@ public class GooglePubsubProperties {
       this.jarPath = jarPath;
     }
 
-    MessageFormat() { }
+    MessageFormat() {
+    }
   }
 }

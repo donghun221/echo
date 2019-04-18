@@ -58,10 +58,25 @@ public class Pipeline {
   boolean limitConcurrent;
 
   @JsonProperty
+  boolean keepWaitingPipelines;
+
+  @JsonProperty
+  boolean plan;
+
+  @JsonProperty
+  boolean respectQuietPeriod;
+
+  @JsonProperty
   List<Trigger> triggers;
 
   @JsonProperty
   String type;
+
+  @JsonProperty
+  String schema;
+
+  @JsonProperty
+  Object template;
 
   @JsonProperty
   List<Map<String, Object>> stages;
@@ -85,5 +100,13 @@ public class Pipeline {
 
   @JsonPOJOBuilder(withPrefix = "")
   public static final class PipelineBuilder {
+    @JsonProperty("config")
+    private void unpackConfig(Map<String, Object> config) {
+      if (config == null) {
+        return;
+      }
+      this.config = config;
+      schema = (String) config.get("schema");
+    }
   }
 }
